@@ -1,0 +1,14 @@
+{
+  "name": "@miniapphub/shell-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Оболочка MiniAppHub для Windows (Tauri). Собственного UI нет",
+  "type": "module",
+  "scripts": {
+    "build:www": "node build.mjs"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.0.0"
+  },
+  "license": "MIT"
+}
