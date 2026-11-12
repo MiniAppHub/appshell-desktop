@@ -1,17 +1,31 @@
+# Сборка и публикация оболочки Windows.
+#
+# Запуск только вручную: Actions -> windows -> Run workflow.
+# Правило версий:
+#   любое изменение версии в package.json  -> обновляется плавающий релиз "latest"
+#   смена мажорной версии                  -> дополнительно создаётся именованный релиз vX.0.0
 name: windows
+
 on:
-  push:
-    branches: [main]
-    tags: ['v*']
-  pull_request:
   workflow_dispatch:
+    inputs:
+      force:
+        description: 'Выпустить, даже если версия совпадает с опубликованной'
+        type: boolean
+        default: false
 
 permissions:
   contents: write
 
+concurrency:
+  group: release-appshell-desktop
+  cancel-in-progress: false
+
 jobs:
   installer:
     runs-on: windows-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v4
         with: { submodules: recursive }
@@ -21,6 +35,7 @@ jobs:
       - uses: swatinem/rust-cache@v2
         with: { workspaces: src-tauri }
       - run: npm ci || npm install
+
       - name: Собрать www с переменными репозитория
         shell: bash
         env:
@@ -28,33 +43,121 @@ jobs:
           CATALOG_URL: ${{ vars.CATALOG_URL || 'https://miniapphub.github.io/catalog.json' }}
           PLATFORM: windows
         run: npm run build:www
+
       - name: Сборка установщиков
         run: npx tauri build
-      - name: Разложить артефакты
+
+      - name: Версия
+        id: ver
         shell: bash
         run: |
           V=$(node -p "require('./package.json').version")
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "major=${V%%.*}" >> "$GITHUB_OUTPUT"
+
+      - name: Разложить артефакты
+        shell: bash
+        run: |
+          V="${{ steps.ver.outputs.version }}"
           mkdir -p dist-out
           cp src-tauri/target/release/bundle/msi/*.msi "dist-out/MiniAppHub-desktop-${V}.msi" 2>/dev/null || true
           cp src-tauri/target/release/bundle/nsis/*-setup.exe "dist-out/MiniAppHub-desktop-${V}-setup.exe" 2>/dev/null || true
           ls -la dist-out
+
       - uses: actions/upload-artifact@v4
         with:
           name: MiniAppHub-desktop
           path: dist-out/*
-      - name: Релиз
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: dist-out/*
-          generate_release_notes: true
-      - name: Сообщить порталу о новом релизе
-        if: startsWith(github.ref, 'refs/tags/v')
+
+      - name: Классификация версии
+        id: cls
+        shell: bash
+        run: |
+          set -eu
+          NEW="${{ steps.ver.outputs.version }}"
+          PREV=$(gh release view latest --repo "$GITHUB_REPOSITORY" --json body -q .body 2>/dev/null | sed -n 's/^version: *//p' | head -1 || true)
+          echo "опубликовано: ${PREV:-нет}, собираем: $NEW"
+          echo "prev=$PREV" >> "$GITHUB_OUTPUT"
+
+          if [ -z "$PREV" ]; then
+            echo "action=release" >> "$GITHUB_OUTPUT"
+            echo "is_major=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ "$NEW" = "$PREV" ]; then
+            if [ "${{ inputs.force }}" = "true" ]; then
+              echo "версия не изменилась, но запрошен force"
+              echo "action=release" >> "$GITHUB_OUTPUT"
+            else
+              echo "версия $NEW уже опубликована — релиз пропущен"
+              echo "action=skip" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            if [ "$(printf '%s\n%s\n' "$PREV" "$NEW" | sort -V | tail -1)" != "$NEW" ]; then
+              echo "::error::версия $NEW ниже опубликованной $PREV — откат запрещён"
+              exit 1
+            fi
+            echo "action=release" >> "$GITHUB_OUTPUT"
+          fi
+
+          if [ "${NEW%%.*}" != "${PREV%%.*}" ]; then
+            echo "is_major=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_major=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Обновить плавающий релиз latest
+        if: steps.cls.outputs.action == 'release'
+        shell: bash
+        run: |
+          set -eu
+          V="${{ steps.ver.outputs.version }}"
+
+          if ! gh release view latest --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create latest --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+              --title "Windows · latest" --notes "version: $V"
+          fi
+
+          # файлы прошлых версий удаляем, иначе в latest копится история
+          for name in $(gh release view latest --repo "$GITHUB_REPOSITORY" --json assets -q '.assets[].name'); do
+            gh release delete-asset latest "$name" --repo "$GITHUB_REPOSITORY" --yes
+          done
+
+          for f in dist-out/*; do
+            gh release upload latest "$f" --repo "$GITHUB_REPOSITORY" --clobber
+          done
+
+          BODY=$(printf 'version: %s\n\nТекущая сборка оболочки Windows. Обновляется при любом изменении версии.' "$V")
+          gh release edit latest --repo "$GITHUB_REPOSITORY" --title "Windows · latest" --notes "$BODY"
+
+      - name: Именованный релиз при смене мажора
+        if: steps.cls.outputs.action == 'release' && steps.cls.outputs.is_major == 'true'
+        shell: bash
+        run: |
+          set -eu
+          V="${{ steps.ver.outputs.version }}"
+          MAJOR="${V%%.*}"
+          if [ "$MAJOR" = "0" ]; then
+            echo "мажор 0 — основной релиз не создаём (до 1.0 действует только latest)"
+            exit 0
+          fi
+          TAG="v$MAJOR.0.0"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "релиз $TAG уже есть, файлы обновлены в latest"
+            exit 0
+          fi
+          gh release create "$TAG" dist-out/* --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" --title "$TAG" --notes "Основной релиз линии $MAJOR.x"
+
+      - name: Сообщить порталу
+        if: steps.cls.outputs.action == 'release'
         shell: bash
         env:
-          GH_TOKEN: ${{ secrets.PORTAL_TOKEN }}
+          PORTAL_TOKEN: ${{ secrets.PORTAL_TOKEN }}
         run: |
-          curl -s -X POST -H "Authorization: Bearer $GH_TOKEN" \
+          curl -sS -X POST \
+            -H "Authorization: Bearer $PORTAL_TOKEN" \
             -H "Accept: application/vnd.github+json" \
             https://api.github.com/repos/MiniAppHub/miniapphub.github.io/dispatches \
             -d '{"event_type":"shell-release","client_payload":{"repo":"appshell-desktop"}}'
