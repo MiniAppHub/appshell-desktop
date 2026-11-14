@@ -5,7 +5,8 @@
   "description": "Оболочка MiniAppHub для Windows (Tauri). Собственного UI нет",
   "type": "module",
   "scripts": {
-    "build:www": "node build.mjs"
+    "build:www": "node build.mjs",
+    "test": "node --test tests/"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.0.0"

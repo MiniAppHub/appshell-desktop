@@ -5,7 +5,7 @@
 
 ```
 index.html     ← страница с iframe (приходит из ядра)
-core/          ← git submodule: рантайм и действия API
+core/          ← рантайм, мост API, действия, SDK (часть этого репозитория)
 api/           ← переопределения действий для Windows
 src-tauri/     ← Rust-обвязка Tauri
 www/           ← результат сборки (генерируется)
@@ -20,7 +20,6 @@ www/           ← результат сборки (генерируется)
 
 ## Сборка
 ```bash
-git submodule update --init --recursive
 npm install
 npm run build:www
 npx tauri build
